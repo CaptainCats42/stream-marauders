@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stream Marauders</title>
+  <style>
+    canvas { background: #222; display: block; margin: 1rem auto; border: 2px solid #444; }
+    body { margin: 0; font-family: sans-serif; background: #111; color: white; text-align: center; }
+    #leaderboard {
+      margin-top: 1rem;
+      background: #333;
+      padding: 1rem;
+      width: 300px;
+      margin-left: auto;
+      margin-right: auto;
+      border-radius: 8px;
+    }
+    #leaderboard h2 { margin-top: 0; }
+    #leaderboard ol { text-align: left; padding-left: 1.2rem; }
+    #status {
+      margin: 1rem;
+      padding: 0.5rem;
+      background: #444;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    #controls {
+      margin: 1rem;
+      background: #333;
+      padding: 1rem;
+      border-radius: 8px;
+      display: inline-block;
+    }
+    #controls input {
+      margin: 0.5rem;
+      padding: 0.5rem;
+      background: #555;
+      color: white;
+      border: 1px solid #666;
+      border-radius: 4px;
+    }
+    #controls button {
+      margin: 0.5rem;
+      padding: 0.5rem 1rem;
+      background: #9146ff;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    #controls button:hover {
+      background: #7c3aed;
+    }
+    #controls button:disabled {
+      background: #555;
+      cursor: not-allowed;
+    }
+    #chatLog {
+      margin: 1rem auto;
+      width: 600px;
+      height: 150px;
+      background: #1a1a1a;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 0.5rem;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 12px;
+      text-align: left;
+    }
+    .chat-message {
+      margin: 2px 0;
+      padding: 2px;
+    }
+    .moderator { color: #00ff00; }
+    .subscriber { color: #ffd700; }
+    .regular { color: #ffffff; }
+    .system { color: #ff6b6b; font-style: italic; }
+    .connection { color: #00bfff; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>🎮 Stream Marauders</h1>
+  
+  <div id="controls">
+    <div>
+      <label>Twitch Channel: </label>
+      <input type="text" id="channelInput" value="CaptainCats42" placeholder="Enter channel name">
+      <button id="connectBtn" onclick="connectToTwitch()">Connect</button>
+      <button id="disconnectBtn" onclick="disconnectFromTwitch()" disabled>Disconnect</button>
+    </div>
+    <div>
+      <button onclick="startGame()">▶️ Start Game</button>
+      <button onclick="clearBattlefield()">🗑️ Clear</button>
+      <button onclick="spawnTestPlayer()">👤 Test Player</button>
+    </div>
+  </div>
+
+  <div id="status">Ready to connect to Twitch...</div>
+  
+  <canvas id="battlefield" width="800" height="400"></canvas>
+  
+  <div id="chatLog"></div>
+  
+  <div id="leaderboard">
+    <h2>🏆 Leaderboard</h2>
+    <ol id="scores"></ol>
+  </div>
+
+  <div style="margin: 2rem; text-align: left; max-width: 600px; margin-left: auto; margin-right: auto; background: #333; padding: 1rem; border-radius: 8px;">
+    <h3>📋 Commands</h3>
+    <ul>
+      <li><strong>!join [unit]</strong> - Join the battle (e.g., !join tank, !join archer)</li>
+      <li><strong>!units</strong> - Show available unit types</li>
+      <li><strong>!start</strong> - Start spawning enemies (mods/broadcaster only)</li>
+      <li><strong>!clear</strong> - Clear battlefield and reset scores (mods/broadcaster only)</li>
+      <li><strong>!stats</strong> - Show your current kill count</li>
+      <li><strong>!help</strong> - Show available commands</li>
+    </ul>
+    
+    <h3>⚔️ Unit Types</h3>
+    <ul>
+      <li><strong>⚔️ Warrior</strong> - Balanced melee fighter (default)</li>
+      <li><strong>🛡️ Tank</strong> - High HP, slow but very durable</li>
+      <li><strong>🏹 Archer</strong> - Ranged attacker, shoots arrows from distance</li>
+      <li><strong>🗡️ Rogue</strong> - Fast assassin with high damage but low HP</li>
+      <li><strong>🔮 Mage</strong> - Powerful magic attacks with long range</li>
+      <li><strong>✨ Paladin</strong> - Holy warrior with balanced stats</li>
+    </ul>
+    
+    <h3>✅ This Version Works In Any Browser!</h3>
+    <p>This game uses native WebSocket connection to Twitch IRC - no external libraries needed!</p>
+    <p>Simply enter a Twitch channel name and click Connect. The game will join that channel's chat.</p>
+  </div>
+
+  <script>
+    // Game variables
+    const canvas = document.getElementById('battlefield');
+    const ctx = canvas.getContext('2d');
+    const units = [];
+    let killCounts = {};
+    let gameActive = false;
+    let currentChannel = '';
+    let socket = null;
+    let pingInterval = null;
+
+    const statusDiv = document.getElementById('status');
+    const chatLog = document.getElementById('chatLog');
+    const joinedUsers = new Set();
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+
+    // Unit types configuration
+    const unitTypes = {
+      warrior: {
+        name: 'Warrior',
+        emoji: '⚔️',
+        hp: 100,
+        speed: 2,
+        damage: 25,
+        size: 20,
+        color: '#32CD32',
+        range: 30,
+        attackSpeed: 800,
+        description: 'Balanced melee fighter'
+      },
+      tank: {
+        name: 'Tank',
+        emoji: '🛡️',
+        hp: 200,
+        speed: 1.2,
+        damage: 15,
+        size: 28,
+        color: '#4169E1',
+        range: 30,
+        attackSpeed: 1200,
+        description: 'High HP, slow but durable'
+      },
+      archer: {
+        name: 'Archer',
+        emoji: '🏹',
+        hp: 80,
+        speed: 2.5,
+        damage: 35,
+        size: 18,
+        color: '#228B22',
+        range: 120,
+        attackSpeed: 1000,
+        description: 'Ranged attacker, fragile but deadly'
+      },
+      rogue: {
+        name: 'Rogue',
+        emoji: '🗡️',
+        hp: 70,
+        speed: 3.5,
+        damage: 40,
+        size: 16,
+        color: '#8B008B',
+        range: 25,
+        attackSpeed: 500,
+        description: 'Fast and deadly, low HP'
+      },
+      mage: {
+        name: 'Mage',
+        emoji: '🔮',
+        hp: 60,
+        speed: 1.8,
+        damage: 50,
+        size: 18,
+        color: '#FF4500',
+        range: 100,
+        attackSpeed: 1500,
+        description: 'Powerful magic attacks, very fragile'
+      },
+      paladin: {
+        name: 'Paladin',
+        emoji: '✨',
+        hp: 150,
+        speed: 1.8,
+        damage: 30,
+        size: 22,
+        color: '#FFD700',
+        range: 35,
+        attackSpeed: 900,
+        description: 'Holy warrior with balanced stats'
+      }
+    };
+
+    // Game classes and functions
+    class Unit {
+      constructor(x, y, type, username = '', unitClass = 'warrior', isSub = false, isMod = false) {
+        this.x = x;
+        this.y = y;
+        this.type = type;
+        this.username = username;
+        this.unitClass = unitClass;
+        
+        if (type === 'player') {
+          const baseStats = unitTypes[unitClass] || unitTypes.warrior;
+          const modBonus = isMod ? 1.5 : isSub ? 1.2 : 1;
+          
+          this.hp = Math.floor(baseStats.hp * modBonus);
+          this.maxHp = this.hp;
+          this.speed = baseStats.speed * (0.8 + Math.random() * 0.4) * modBonus;
+          this.damage = Math.floor(baseStats.damage * modBonus);
+          this.size = baseStats.size + (isMod ? 4 : isSub ? 2 : 0);
+          this.color = baseStats.color;
+          this.range = baseStats.range;
+          this.attackSpeed = Math.max(300, baseStats.attackSpeed - (isMod ? 200 : isSub ? 100 : 0));
+          this.emoji = baseStats.emoji;
+        } else {
+          this.hp = 80;
+          this.maxHp = this.hp;
+          this.speed = 1 + Math.random() * 0.8;
+          this.damage = 15;
+          this.size = 18;
+          this.color = 'red';
+          this.range = 30;
+          this.attackSpeed = 800;
+          this.emoji = '👹';
+        }
+        
+        this.lastAttack = 0;
+        this.isSub = isSub;
+        this.isMod = isMod;
+        this.kills = 0;
+        this.projectiles = [];
+      }
+
+      move() {
+        if (this.type === 'player') {
+          this.x += this.speed;
+        } else {
+          this.x -= this.speed;
+          // Add some vertical movement for enemies
+          this.y += Math.sin(Date.now() * 0.002 + this.x * 0.01) * 1;
+          this.y = Math.max(20, Math.min(canvas.height - 40, this.y));
+        }
+      }
+
+      draw() {
+        // Update projectiles first
+        for (let i = this.projectiles.length - 1; i >= 0; i--) {
+          const proj = this.projectiles[i];
+          proj.x += proj.vx;
+          proj.y += proj.vy;
+          
+          // Remove projectiles that are off screen
+          if (proj.x < 0 || proj.x > canvas.width || proj.y < 0 || proj.y > canvas.height) {
+            this.projectiles.splice(i, 1);
+            continue;
+          }
+          
+          // Draw projectile
+          ctx.fillStyle = proj.color;
+          ctx.beginPath();
+          ctx.arc(proj.x, proj.y, 3, 0, Math.PI * 2);
+          ctx.fill();
+          
+          // Check collision with enemies
+          if (this.type === 'player') {
+            for (let j = units.length - 1; j >= 0; j--) {
+              const target = units[j];
+              if (target.type === 'enemy') {
+                const dist = Math.sqrt(Math.pow(proj.x - (target.x + target.size/2), 2) + 
+                                     Math.pow(proj.y - (target.y + target.size/2), 2));
+                if (dist < target.size/2 + 3) {
+                  target.hp -= this.damage;
+                  this.projectiles.splice(i, 1);
+                  
+                  if (target.hp <= 0) {
+                    this.kills++;
+                    killCounts[this.username] = (killCounts[this.username] || 0) + 1;
+                    updateLeaderboard();
+                    logMessage(`💀 ${this.username} (${unitTypes[this.unitClass].name}) eliminated an enemy! Total: ${killCounts[this.username]}`, 'system');
+                  }
+                  break;
+                }
+              }
+            }
+          }
+        }
+        
+        // Draw unit with glow effect for special users
+        if (this.isMod) {
+          ctx.shadowColor = '#ff6b6b';
+          ctx.shadowBlur = 10;
+        } else if (this.isSub) {
+          ctx.shadowColor = '#ffd700';
+          ctx.shadowBlur = 8;
+        }
+        
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x, this.y, this.size, this.size);
+        ctx.shadowBlur = 0;
+        
+        // Draw health bar
+        const healthWidth = this.size * (this.hp / this.maxHp);
+        ctx.fillStyle = 'red';
+        ctx.fillRect(this.x, this.y - 10, this.size, 4);
+        ctx.fillStyle = 'green';
+        ctx.fillRect(this.x, this.y - 10, healthWidth, 4);
+        
+        // Draw username, class, and badges
+        ctx.fillStyle = '#fff';
+        ctx.font = '9px Arial';
+        if (this.username) {
+          let displayName = this.username;
+          if (this.type === 'player') {
+            displayName = `${this.emoji}${displayName}`;
+          }
+          if (this.isMod) displayName = '👑' + displayName;
+          else if (this.isSub) displayName = '⭐' + displayName;
+          
+          const textWidth = ctx.measureText(displayName).width;
+          ctx.fillText(displayName, this.x - (textWidth - this.size) / 2, this.y - 14);
+        }
+      }
+
+      attack(target) {
+        const now = Date.now();
+        if (now - this.lastAttack > this.attackSpeed) {
+          const distance = Math.sqrt(
+            Math.pow((this.x + this.size/2) - (target.x + target.size/2), 2) + 
+            Math.pow((this.y + this.size/2) - (target.y + target.size/2), 2)
+          );
+          
+          if (distance <= this.range) {
+            // Ranged units (archer, mage) shoot projectiles
+            if (this.type === 'player' && (this.unitClass === 'archer' || this.unitClass === 'mage')) {
+              const angle = Math.atan2(
+                (target.y + target.size/2) - (this.y + this.size/2),
+                (target.x + target.size/2) - (this.x + this.size/2)
+              );
+              
+              const speed = this.unitClass === 'archer' ? 8 : 6;
+              const projectileColor = this.unitClass === 'archer' ? '#8B4513' : '#FF4500';
+              
+              this.projectiles.push({
+                x: this.x + this.size/2,
+                y: this.y + this.size/2,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                color: projectileColor
+              });
+              
+              this.lastAttack = now;
+              return false; // Projectile will handle damage
+            } else {
+              // Melee attack
+              target.hp -= this.damage;
+              this.lastAttack = now;
+              
+              if (target.hp <= 0 && this.username) {
+                this.kills++;
+                killCounts[this.username] = (killCounts[this.username] || 0) + 1;
+                updateLeaderboard();
+                logMessage(`💀 ${this.username} (${unitTypes[this.unitClass].name}) eliminated an enemy! Total: ${killCounts[this.username]}`, 'system');
+              }
+              return true;
+            }
+          }
+        }
+        return false;
+      }
+    }
+
+    function updateStatus(message, isError = false) {
+      statusDiv.textContent = message;
+      statusDiv.style.background = isError ? '#8B0000' : '#444';
+      statusDiv.style.color = isError ? '#ffcccc' : 'white';
+    }
+
+    function logMessage(message, type = 'system') {
+      const div = document.createElement('div');
+      div.className = `chat-message ${type}`;
+      div.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      chatLog.appendChild(div);
+      chatLog.scrollTop = chatLog.scrollHeight;
+      
+      // Keep only last 100 messages
+      while (chatLog.children.length > 100) {
+        chatLog.removeChild(chatLog.firstChild);
+      }
+    }
+
+    function spawnEnemy() {
+      if (!gameActive || units.filter(u => u.type === 'enemy').length >= 6) return;
+      
+      const y = 50 + Math.random() * (canvas.height - 100);
+      const enemyTypes = ['red', '#ff4444', '#cc0000'];
+      const color = enemyTypes[Math.floor(Math.random() * enemyTypes.length)];
+      const enemy = new Unit(canvas.width - 30, y, 'enemy', '', color);
+      units.push(enemy);
+    }
+
+    function spawnPlayer(username, unitClass = 'warrior', isSub = false, isMod = false, isBroadcaster = false) {
+      // Check if user already has a unit
+      const existingUnit = units.find(u => u.username === username && u.type === 'player');
+      if (existingUnit) {
+        logMessage(`${username} is already in battle as a ${unitTypes[existingUnit.unitClass].name}!`, 'system');
+        return;
+      }
+      
+      // Validate unit class
+      if (!unitTypes[unitClass]) {
+        logMessage(`Unknown unit type: ${unitClass}. Available: ${Object.keys(unitTypes).join(', ')}`, 'system');
+        return;
+      }
+      
+      const y = 50 + Math.random() * (canvas.height - 100);
+      let color = unitTypes[unitClass].color;
+      
+      // Special colors for broadcaster/mod
+      if (isBroadcaster) {
+        // Add royal purple tint to broadcaster
+        const r = parseInt(color.slice(1, 3), 16);
+        const g = parseInt(color.slice(3, 5), 16);
+        const b = parseInt(color.slice(5, 7), 16);
+        color = `rgb(${Math.min(255, r + 50)}, ${Math.max(0, g - 30)}, ${Math.min(255, b + 100)})`;
+      }
+      
+      const player = new Unit(10, y, 'player', username, unitClass, isSub, isMod || isBroadcaster);
+      units.push(player);
+      joinedUsers.add(username);
+      
+      let status = '';
+      if (isBroadcaster) status = ' (Broadcaster)';
+      else if (isMod) status = ' (Moderator)';
+      else if (isSub) status = ' (Subscriber)';
+      
+      const unitInfo = unitTypes[unitClass];
+      logMessage(`⚔️ ${username} joined as ${unitInfo.emoji} ${unitInfo.name}!${status} - ${unitInfo.description}`, 'system');
+    }
+
+    function update() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw battlefield grid
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < canvas.width; i += 50) {
+        ctx.beginPath();
+        ctx.moveTo(i, 0);
+        ctx.lineTo(i, canvas.height);
+        ctx.stroke();
+      }
+      for (let i = 0; i < canvas.height; i += 50) {
+        ctx.beginPath();
+        ctx.moveTo(0, i);
+        ctx.lineTo(canvas.width, i);
+        ctx.stroke();
+      }
+
+      // Update and draw units
+      for (let i = units.length - 1; i >= 0; i--) {
+        const unit = units[i];
+        unit.move();
+
+        // Remove units that go off screen
+        if (unit.x < -50 || unit.x > canvas.width + 50) {
+          if (unit.username) {
+            joinedUsers.delete(unit.username);
+          }
+          units.splice(i, 1);
+          continue;
+        }
+
+        // Combat logic
+        for (let j = units.length - 1; j >= 0; j--) {
+          if (i >= units.length) break;
+          
+          const other = units[j];
+          if (!other || unit === other || unit.type === other.type) continue;
+
+          const distance = Math.sqrt(
+            Math.pow((unit.x + unit.size/2) - (other.x + other.size/2), 2) + 
+            Math.pow((unit.y + unit.size/2) - (other.y + other.size/2), 2)
+          );
+
+          if (distance <= unit.range) {
+            unit.attack(other);
+            
+            if (other.hp <= 0) {
+              if (other.username) {
+                joinedUsers.delete(other.username);
+              }
+              units.splice(j, 1);
+              if (j < i) i--;
+            }
+          }
+        }
+
+        if (i < units.length && units[i]) {
+          units[i].draw();
+        }
+      }
+
+      // Draw game stats
+      ctx.fillStyle = 'white';
+      ctx.font = '16px Arial';
+      ctx.fillText(`Players: ${units.filter(u => u.type === 'player').length}`, 10, 30);
+      ctx.fillText(`Enemies: ${units.filter(u => u.type === 'enemy').length}`, 150, 30);
+      ctx.fillText(`Status: ${gameActive ? 'ACTIVE' : 'WAITING'}`, 300, 30);
+      
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        ctx.fillStyle = '#00ff00';
+        ctx.fillText(`Connected: #${currentChannel}`, 500, 30);
+      }
+    }
+
+    function updateLeaderboard() {
+      const scores = Object.entries(killCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 15);
+      
+      const list = document.getElementById('scores');
+      list.innerHTML = '';
+      
+      if (scores.length === 0) {
+        const li = document.createElement('li');
+        li.textContent = 'No kills yet!';
+        li.style.fontStyle = 'italic';
+        list.appendChild(li);
+        return;
+      }
+      
+      scores.forEach(([user, kills], index) => {
+        const li = document.createElement('li');
+        const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '';
+        li.innerHTML = `${medal} <strong>${user}</strong>: ${kills} kill${kills === 1 ? '' : 's'}`;
+        list.appendChild(li);
+      });
+    }
+
+    // Twitch WebSocket connection functions
+    function connectToTwitch() {
+      const channelInput = document.getElementById('channelInput');
+      const channel = channelInput.value.trim().toLowerCase();
+      
+      if (!channel) {
+        updateStatus('Please enter a channel name', true);
+        return;
+      }
+
+      if (socket) {
+        disconnectFromTwitch();
+      }
+
+      currentChannel = channel;
+      updateStatus('Connecting to Twitch IRC...');
+      connectBtn.disabled = true;
+
+      try {
+        socket = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+        
+        socket.onopen = () => {
+          logMessage('Connected to Twitch IRC server', 'connection');
+          
+          // Authenticate as anonymous user
+          socket.send('PASS SCHMOOPIIE');
+          socket.send('NICK justinfan12345');
+          socket.send(`JOIN #${channel}`);
+          
+          // Set up ping interval
+          pingInterval = setInterval(() => {
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send('PING :tmi.twitch.tv');
+            }
+          }, 30000);
+        };
+
+        socket.onmessage = (event) => {
+          handleIRCMessage(event.data);
+        };
+
+        socket.onclose = () => {
+          updateStatus('❌ Disconnected from Twitch', true);
+          logMessage('Disconnected from Twitch IRC', 'connection');
+          connectBtn.disabled = false;
+          disconnectBtn.disabled = true;
+          if (pingInterval) {
+            clearInterval(pingInterval);
+            pingInterval = null;
+          }
+        };
+
+        socket.onerror = (error) => {
+          updateStatus('❌ Connection error', true);
+          logMessage('WebSocket error occurred', 'system');
+          console.error('WebSocket error:', error);
+        };
+
+      } catch (error) {
+        updateStatus(`❌ Failed to connect: ${error.message}`, true);
+        logMessage(`Connection failed: ${error.message}`, 'system');
+        connectBtn.disabled = false;
+      }
+    }
+
+    function disconnectFromTwitch() {
+      if (socket) {
+        socket.close();
+        socket = null;
+      }
+      if (pingInterval) {
+        clearInterval(pingInterval);
+        pingInterval = null;
+      }
+      updateStatus('Disconnected from Twitch');
+      connectBtn.disabled = false;
+      disconnectBtn.disabled = true;
+    }
+
+    function handleIRCMessage(data) {
+      const lines = data.split('\r\n');
+      
+      lines.forEach(line => {
+        if (!line) return;
+        
+        // Handle PING
+        if (line.startsWith('PING')) {
+          socket.send('PONG :tmi.twitch.tv');
+          return;
+        }
+        
+        // Handle successful join
+        if (line.includes(`JOIN #${currentChannel}`)) {
+          updateStatus(`✅ Connected to #${currentChannel}!`);
+          logMessage(`Joined channel: #${currentChannel}`, 'connection');
+          connectBtn.disabled = false;
+          disconnectBtn.disabled = false;
+          return;
+        }
+        
+        // Handle chat messages
+        if (line.includes('PRIVMSG')) {
+          parseChatMessage(line);
+        }
+      });
+    }
+
+    function parseChatMessage(line) {
+      // Parse IRC message format
+      const match = line.match(/:(\w+)!\w+@\w+\.tmi\.twitch\.tv PRIVMSG #\w+ :(.+)/);
+      if (!match) return;
+      
+      const username = match[1].toLowerCase();
+      const message = match[2];
+      
+      // Extract badges from the raw IRC line
+      const badgeMatch = line.match(/badges=([^;]*)/);
+      let isSub = false;
+      let isMod = false;
+      let isBroadcaster = false;
+      
+      if (badgeMatch) {
+        const badges = badgeMatch[1];
+        isSub = badges.includes('subscriber');
+        isMod = badges.includes('moderator');
+        isBroadcaster = badges.includes('broadcaster');
+      }
+      
+      // Log chat message
+      const userType = isBroadcaster ? 'moderator' : isMod ? 'moderator' : isSub ? 'subscriber' : 'regular';
+      logMessage(`${username}: ${message}`, userType);
+
+      // Handle commands
+      const cmd = message.trim().toLowerCase();
+      const parts = cmd.split(' ');
+      const command = parts[0];
+      const unitClass = parts[1] || 'warrior';
+      
+      if (command === '!join') {
+        spawnPlayer(username, unitClass, isSub, isMod, isBroadcaster);
+      }
+      else if (cmd === '!units' || cmd === '!classes') {
+        const unitList = Object.entries(unitTypes).map(([key, unit]) => 
+          `${unit.emoji} ${key} (${unit.description})`
+        ).join(', ');
+        logMessage(`Available units: ${unitList}`, 'system');
+      }
+      else if (cmd === '!start' && (isMod || isBroadcaster)) {
+        gameActive = true;
+        logMessage('🎮 Game started by moderator!', 'system');
+        updateStatus(`Game started by ${username}!`);
+      }
+      else if (cmd === '!clear' && (isMod || isBroadcaster)) {
+        clearBattlefield();
+        logMessage('🗑️ Battlefield cleared by moderator!', 'system');
+      }
+      else if (cmd === '!stats') {
+        const kills = killCounts[username] || 0;
+        const playerUnit = units.find(u => u.username === username && u.type === 'player');
+        const unitInfo = playerUnit ? ` as ${unitTypes[playerUnit.unitClass].emoji} ${unitTypes[playerUnit.unitClass].name}` : '';
+        logMessage(`📊 ${username}${unitInfo}: ${kills} kill${kills === 1 ? '' : 's'}`, 'system');
+      }
+      else if (cmd === '!help') {
+        logMessage('Commands: !join [unit], !units, !start (mods), !clear (mods), !stats, !help', 'system');
+      }
+    }
+
+    // Game control functions
+    function startGame() {
+      gameActive = true;
+      updateStatus('Game started manually!');
+      logMessage('🎮 Game started manually!', 'system');
+    }
+
+    function clearBattlefield() {
+      units.length = 0;
+      joinedUsers.clear();
+      killCounts = {};
+      gameActive = false;
+      updateLeaderboard();
+      updateStatus('Battlefield cleared!');
+    }
+
+    function spawnTestPlayer() {
+      const testNames = ['TestWarrior', 'DemoFighter', 'SampleHero', 'MockChampion'];
+      const name = testNames[Math.floor(Math.random() * testNames.length)] + Math.floor(Math.random() * 100);
+      const unitClasses = Object.keys(unitTypes);
+      const randomClass = unitClasses[Math.floor(Math.random() * unitClasses.length)];
+      const isSub = Math.random() > 0.7;
+      const isMod = Math.random() > 0.9;
+      spawnPlayer(name, randomClass, isSub, isMod);
+    }
+
+    // Initialize game
+    setInterval(update, 1000 / 60); // 60 FPS
+    setInterval(spawnEnemy, 3000); // Spawn enemy every 3 seconds
+    updateLeaderboard();
+
+    // Initialize messages
+    logMessage('🎮 Stream Marauders - Native WebSocket Edition!', 'system');
+    logMessage('This version works in ANY browser without external libraries!', 'system');
+    logMessage('Enter any Twitch channel name and click Connect to start.', 'system');
+
+    // Handle page unload
+    window.addEventListener('beforeunload', () => {
+      if (socket) {
+        socket.close();
+      }
+    });
+  </script>
+</body>
+</html>
